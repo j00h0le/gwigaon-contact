@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex, nofollow">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self'; img-src 'self' data:; connect-src http://127.0.0.1:54321 ws://127.0.0.1:54321 http://localhost:54321 ws://localhost:54321 https://*.supabase.co wss://*.supabase.co; base-uri 'none'; form-action 'none'">
+  <title>귀가온 · 귀가 현황</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="brand">
+    <span class="brand-mark" aria-hidden="true">●</span>
+    <span>귀가온</span>
+  </header>
+
+  <main id="app" aria-live="polite">
+    <section id="loading" class="panel center">
+      <p class="muted">귀가 현황을 불러오는 중…</p>
+    </section>
+
+    <section id="invalid" class="panel center" hidden>
+      <h1>유효하지 않은 링크</h1>
+      <p class="muted">링크가 올바른지 확인하거나, 링크를 보낸 분께 다시 요청해 주세요.</p>
+    </section>
+
+    <section id="error" class="panel center" hidden>
+      <h1>연결할 수 없어요</h1>
+      <p class="muted" id="error-text">네트워크 상태를 확인한 뒤 다시 시도해 주세요.</p>
+      <button type="button" id="retry" class="btn">다시 시도</button>
+    </section>
+
+    <div id="trip" hidden>
+      <div id="banners"></div>
+
+      <section class="panel status-card">
+        <p class="eyebrow">목적지</p>
+        <h1 id="destination">—</h1>
+        <p class="status" id="status"><span class="dot" aria-hidden="true"></span><span id="status-text">—</span></p>
+        <dl class="facts">
+          <div><dt>마지막 신호</dt><dd id="last-seen">—</dd></div>
+          <div><dt>마지막 위치</dt><dd id="location">—</dd></div>
+        </dl>
+      </section>
+
+      <section class="panel" id="report" hidden>
+        <p class="eyebrow ai">AI 해석</p>
+        <p id="report-summary"></p>
+        <ul id="report-notable" class="plain"></ul>
+        <ul id="report-caveats" class="plain muted small"></ul>
+        <p class="muted small">기록된 이벤트만을 바탕으로 AI가 작성한 해석이에요. 아래 측정된 기록이 기준입니다.</p>
+      </section>
+
+      <section class="panel">
+        <h2 class="eyebrow">측정된 기록</h2>
+        <ol id="timeline" class="timeline"></ol>
+      </section>
+
+      <p class="muted small center footer-note">이 페이지는 자동으로 갱신돼요. 귀가온은 긴급 신고를 대신하지 않습니다. 위급하면 112 또는 119에 연락하세요.</p>
+    </div>
+  </main>
+
+  <template id="tpl-event">
+    <li class="event">
+      <span class="event-dot" aria-hidden="true"></span>
+      <div class="event-body">
+        <p class="event-head"><span class="event-label"></span><time class="event-time"></time></p>
+        <p class="event-reason"></p>
+      </div>
+    </li>
+  </template>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.118.0/dist/umd/supabase.js"
+          integrity="sha384-TcHRA3zBbn+Lexh5n+Oil4guNPOS3rjNDpGRAN46u/s/mB2IZ50ceC6TYDU2yvgK"
+          crossorigin="anonymous"></script>
+  <script src="config.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
