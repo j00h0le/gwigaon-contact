@@ -1,12 +1,15 @@
-// 귀가온 trusted-contact page. Token comes from the URL fragment (#t=…), which browsers
-// never send to a server. Flow: anonymous sign-in → join_trip(token) → load → Realtime.
+// 귀가온 trusted-contact page. Token comes from the URL fragment, which browsers never send to a
+// server. #c=… is the car owner's standing link (ADR 0019): anonymous sign-in → join_owner_link →
+// the owner's newest visible trip, switching when a new one starts. #t=… is one trip (ADR 0011):
+// anonymous sign-in → join_trip → load → Realtime.
 import {
   deriveView,
   eventMeta,
   mapLink,
   mergeEvents,
+  linkFromHash,
+  newerTrip,
   relativeKo,
-  tokenFromHash,
 } from "./state.js";
 
 const REFRESH_TICK_MS = 5_000; // re-derive "interrupted" from last_seen_at
@@ -19,12 +22,21 @@ const timeFmt = new Intl.DateTimeFormat("ko-KR", {
   timeZone: "Asia/Seoul",
 });
 
+const TRIP_COLUMNS = "id,status,destination_label,started_at,ended_at,last_seen_at";
+
 const state = { tripId: null, trip: null, events: [], report: null, seenSeqs: new Set() };
+/** Standing link (#c=): its token and the owner it follows; null for a one-trip link. */
+const link = { token: null, owner: null };
 let client = null;
 let channel = null;
+let ownerChannel = null;
+
+/** Tab titles for the screens without a trip (the trip screen sets its own in render()). */
+const TITLES = { invalid: "유효하지 않은 링크", revoked: "연결이 끊겼어요", waiting: "운행 전", error: "연결할 수 없어요" };
 
 function show(sectionId) {
-  for (const id of ["loading", "invalid", "error", "trip"]) $(id).hidden = id !== sectionId;
+  for (const id of ["loading", "invalid", "revoked", "waiting", "error", "trip"]) $(id).hidden = id !== sectionId;
+  if (TITLES[sectionId]) document.title = `귀가온 · ${TITLES[sectionId]}`;
 }
 
 function fail(message) {
@@ -35,8 +47,8 @@ function fail(message) {
 
 async function start() {
   show("loading");
-  const token = tokenFromHash(location.hash);
-  if (!token) return show("invalid");
+  const target = linkFromHash(location.hash);
+  if (!target) return show("invalid");
 
   const cfg = window.GWIGAON_CONFIG;
   if (!client) {
@@ -51,22 +63,79 @@ async function start() {
     if (error) return fail(`sign-in: ${error.message}`);
   }
 
-  const { data: tripId, error: joinError } = await client.rpc("join_trip", { token });
+  if (target.kind === "owner") return startOwner(target.token);
+
+  const { data: tripId, error: joinError } = await client.rpc("join_trip", { token: target.token });
   if (joinError) return fail(`join_trip: ${joinError.message}`);
   if (!tripId) return show("invalid");
-  state.tripId = tripId;
+  await openTrip(tripId);
+}
 
+async function openTrip(tripId) {
+  state.tripId = tripId;
+  state.trip = null;
+  state.events = [];
+  state.report = null;
   if (!(await loadAll())) return;
   show("trip");
   render();
   subscribe();
 }
 
+/** #c=: join the owner's link, then follow their newest visible trip (운행 전 until there is one). */
+async function startOwner(token) {
+  const { data: owner, error } = await client.rpc("join_owner_link", { token });
+  if (error) return fail(`join_owner_link: ${error.message}`);
+  // Unknown, replaced or full (5 phones): the same answer, so the page can't tell them apart either.
+  if (!owner) return show("revoked");
+  link.token = token;
+  link.owner = owner;
+  watchOwner();
+  await followNewest();
+}
+
+/** Shows the owner's newest visible trip if it is newer than the one on screen. */
+async function followNewest() {
+  const { data, error } = await client.from("trips").select(TRIP_COLUMNS).eq("owner", link.owner)
+    .order("started_at", { ascending: false }).limit(1).maybeSingle();
+  if (error) return fail(`newest trip: ${error.message}`);
+  const next = newerTrip(state.trip, data);
+  if (!next) return show("waiting");
+  if (next.id !== state.tripId) await openTrip(next.id);
+}
+
+/** A new trip of the owner switches the page to it as it starts (RLS decides what arrives). */
+function watchOwner() {
+  if (ownerChannel) client.removeChannel(ownerChannel);
+  ownerChannel = client
+    .channel(`owner-${link.owner}`)
+    .on("postgres_changes", { event: "INSERT", schema: "public", table: "trips", filter: `owner=eq.${link.owner}` },
+      () => followNewest())
+    .subscribe((status) => {
+      if (status === "SUBSCRIBED") followNewest();
+      else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") console.warn("[contact] realtime owner", status);
+    });
+}
+
+/** Resync for a standing link: still joined (QR not replaced)? then any newer trip. */
+async function recheckOwner() {
+  const { data: owner, error } = await client.rpc("join_owner_link", { token: link.token });
+  if (error) return console.warn("[contact] link check failed:", error.message);
+  if (!owner) {
+    if (channel) client.removeChannel(channel);
+    if (ownerChannel) client.removeChannel(ownerChannel);
+    channel = ownerChannel = null;
+    state.trip = null;
+    return show("revoked");
+  }
+  await followNewest();
+}
+
 /** quiet: background resync — log errors, keep showing the last good state. */
 async function loadAll({ quiet = false } = {}) {
   const id = state.tripId;
   const [tripRes, eventsRes, reportRes] = await Promise.all([
-    client.from("trips").select("id,status,destination_label,started_at,ended_at,last_seen_at").eq("id", id).single(),
+    client.from("trips").select(TRIP_COLUMNS).eq("id", id).single(),
     client.from("trip_events").select("seq,type,occurred_at,lat,lng,reason,payload").eq("trip_id", id).order("seq"),
     client.from("trip_reports").select("summary,model,created_at").eq("trip_id", id).maybeSingle(),
   ]);
@@ -193,6 +262,8 @@ function renderBanners(view) {
         `마지막 신호: ${relativeKo(b.silentMs)}`,
         "차량 앱과의 연결이 끊겼어요. 통신 상태 때문일 수 있어요.",
       ]));
+    } else if (b.kind === "ended_early") {
+      out.push(banner("warn", "목적지 밖에서 운행이 끝났어요", [e.reason, at, "승객에게 연락해 안전한지 확인해 보세요."], where));
     } else if (b.kind === "arrived") {
       out.push(banner("ok", "안전하게 도착했어요", ["승객 하차가 확인됐어요."]));
     }
@@ -244,12 +315,16 @@ function renderReport(report) {
 
 $("retry").addEventListener("click", () => start());
 window.addEventListener("hashchange", () => location.reload());
-document.addEventListener("visibilitychange", async () => {
-  if (document.visibilityState === "visible" && state.tripId && (await loadAll({ quiet: true }))) render();
+async function resync() {
+  if (link.owner) await recheckOwner();
+  if (state.tripId && (await loadAll({ quiet: true }))) render();
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") resync();
 });
 setInterval(() => state.trip && render(), REFRESH_TICK_MS);
-setInterval(async () => {
-  if (state.tripId && document.visibilityState === "visible" && (await loadAll({ quiet: true }))) render();
+setInterval(() => {
+  if (document.visibilityState === "visible") resync();
 }, RESYNC_MS);
 
 start().catch((e) => fail(e?.message ?? String(e)));

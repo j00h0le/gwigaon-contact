@@ -22,15 +22,40 @@ export const EVENT_META = {
   CHECK_IN_ANSWERED: { label: "상태 확인 응답", tone: "ok" },
   TRIP_ENDED: { label: "운행 종료", tone: "neutral" },
   PIN_LOCKOUT: { label: "PIN 잠김 (여러 번 틀림)", tone: "warn" },
+  SETTINGS_CHANGED: { label: "설정 변경", tone: "neutral" },
 };
+
+/** Trip ends without a PIN (ADR 0015): plain at arrival, or early (a warning). */
+const TRIP_END_META = {
+  ended_at_arrival: { label: "도착 후 운행 종료", tone: "neutral" },
+  ended_early: { label: "목적지 밖에서 운행 종료", tone: "warn" },
+};
+
+/** 설정 parts named in `SETTINGS_CHANGED.payload.fields` (ADR 0015); the values never leave the car. */
+const SETTINGS_FIELD_NAMES = { home: "집 주소", contacts: "보호자", cues: "대화 감지", arrival: "도착 안내", pin: "PIN" };
 
 /** A driver's "승객 반응 있음" is not a safe arrival: the trip waits for the passenger to get out (ADR 0007). */
 const isDriverConfirmation = (e) =>
   e.type === "SAFE_ARRIVAL_CONFIRMED" && e.payload?.closed_by === "driver_confirmed";
 
+/** Check-in answers (conflict cues): timeline only, never a banner; `no_response` = the card timed out. */
+const CHECK_IN_ANSWER_META = {
+  ok: { label: "상태 확인: 괜찮음", tone: "ok" },
+  sos: { label: "상태 확인: SOS 선택", tone: "danger" },
+  no_response: { label: "상태 확인: 응답 없음", tone: "warn" },
+};
+
 export function eventMeta(type, payload) {
   if (type === "SAFE_ARRIVAL_CONFIRMED" && payload?.closed_by === "driver_confirmed") {
     return { label: "기사 확인 (하차 전)", tone: "warn" };
+  }
+  if (type === "TRIP_ENDED" && TRIP_END_META[payload?.reason]) return TRIP_END_META[payload.reason];
+  if (type === "SETTINGS_CHANGED" && Array.isArray(payload?.fields)) {
+    const names = payload.fields.map((f) => SETTINGS_FIELD_NAMES[f]).filter(Boolean);
+    if (names.length) return { label: `설정 변경: ${names.join(", ")}`, tone: "neutral" };
+  }
+  if (type === "CHECK_IN_ANSWERED" && CHECK_IN_ANSWER_META[payload?.answer]) {
+    return CHECK_IN_ANSWER_META[payload.answer];
   }
   return EVENT_META[type] ?? { label: type, tone: "neutral" };
 }
@@ -78,6 +103,8 @@ export function deriveView(trip, events, now) {
   const safeArrived = events.some((e) => e.type === "SAFE_ARRIVAL_CONFIRMED" && !isDriverConfirmation(e)) ||
     events.some((e) => e.type === "TRIP_ENDED" && e.payload?.reason === "safe_arrival");
   const waitingForPassenger = !ended && !safeArrived && events.some(isDriverConfirmation);
+  /** Ended without a PIN away from the destination (ADR 0015): the 보호자 should check in. */
+  const endedEarly = events.find((e) => e.type === "TRIP_ENDED" && e.payload?.reason === "ended_early") ?? null;
 
   /** Big banners, most urgent first. */
   const banners = [];
@@ -85,14 +112,15 @@ export function deriveView(trip, events, now) {
   if (safeCheck && !ended) banners.push({ kind: "safe_check", event: safeCheck });
   if (interrupted) banners.push({ kind: "interrupted", event: interruptedEvent, silentMs });
   if (ended && safeArrived && !sos) banners.push({ kind: "arrived" });
+  if (endedEarly && !safeArrived) banners.push({ kind: "ended_early", event: endedEarly });
 
   let status;
   if (sos) status = { text: "SOS 비상 신호 발생", tone: "danger" };
   else if (safeCheck && !ended) status = { text: "도착 후 하차 확인 중", tone: "danger" };
   else if (waitingForPassenger) status = { text: "기사가 승객 반응 확인 · 하차 대기 중", tone: "warn" };
-  else if (ended) status = safeArrived
-    ? { text: "안전하게 도착했어요", tone: "ok" }
-    : { text: "운행 종료", tone: "neutral" };
+  else if (ended && safeArrived) status = { text: "안전하게 도착했어요", tone: "ok" };
+  else if (endedEarly) status = { text: "목적지 밖에서 운행 종료", tone: "warn" };
+  else if (ended) status = { text: "운행 종료", tone: "neutral" };
   else if (interrupted) status = { text: "모니터링 중단됨", tone: "warn" };
   else if (deviation) status = { text: "경로 이탈 중", tone: "warn" };
   else if (longStop) status = { text: "장시간 정차 중", tone: "warn" };
@@ -119,9 +147,35 @@ export function relativeKo(ms) {
   return `${h}시간 ${m % 60}분 전`;
 }
 
+const TOKEN = /^[A-Za-z0-9_-]{22,}$/;
+
 /** Reads `t` from a URL fragment like `#t=abc`. Never from the query string. */
 export function tokenFromHash(hash) {
-  const params = new URLSearchParams(hash.replace(/^#/, ""));
+  if (!hash.startsWith("#")) return null;
+  const params = new URLSearchParams(hash.slice(1));
   const t = params.get("t");
-  return t && /^[A-Za-z0-9_-]{22,}$/.test(t) ? t : null;
+  return t && TOKEN.test(t) ? t : null;
+}
+
+/**
+ * What the fragment links to: `#c=` the car owner's standing link (ADR 0019, follows every trip),
+ * `#t=` one trip (ADR 0011). Null for anything else. Never from the query string.
+ */
+export function linkFromHash(hash) {
+  if (!hash.startsWith("#")) return null;
+  const params = new URLSearchParams(hash.slice(1));
+  const c = params.get("c");
+  if (c && TOKEN.test(c)) return { kind: "owner", token: c };
+  const t = tokenFromHash(hash);
+  return t ? { kind: "trip", token: t } : null;
+}
+
+/**
+ * Which trip a standing link should show: the newest one that started (RLS already hides the
+ * trips the link may not see). A trip that started later replaces the one on screen.
+ */
+export function newerTrip(current, candidate) {
+  if (!candidate) return current ?? null;
+  if (!current) return candidate;
+  return Date.parse(candidate.started_at) > Date.parse(current.started_at) ? candidate : current;
 }

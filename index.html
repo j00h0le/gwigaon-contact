@@ -27,6 +27,16 @@
       <p class="muted">링크가 올바른지 확인하거나, 링크를 보낸 분께 다시 요청해 주세요. 링크는 운행이 끝나고 하루가 지나면 만료돼요.</p>
     </section>
 
+    <section id="revoked" class="panel center" hidden>
+      <h1>연결이 끊겼어요</h1>
+      <p class="muted">차 주인이 QR을 다시 만들었거나, 이미 휴대폰 5대가 연결된 링크예요. 차 주인에게 새 QR을 받아 주세요.</p>
+    </section>
+
+    <section id="waiting" class="panel center" hidden>
+      <h1>운행 전이에요</h1>
+      <p class="muted">연결됐어요. 대리운전이 시작되면 이 화면에 바로 보여요. 이 페이지를 열어 두거나 나중에 다시 열어 주세요.</p>
+    </section>
+
     <section id="error" class="panel center" hidden>
       <h1>연결할 수 없어요</h1>
       <p class="muted" id="error-text">네트워크 상태를 확인한 뒤 다시 시도해 주세요.</p>
@@ -47,7 +57,7 @@
       </section>
 
       <section class="panel" id="report" hidden>
-        <p class="eyebrow ai">AI 해석</p>
+        <p class="eyebrow ai">귀가온 리포트</p>
         <p id="report-summary"></p>
         <ul id="report-notable" class="plain"></ul>
         <ul id="report-caveats" class="plain muted small"></ul>
